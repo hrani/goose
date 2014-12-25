@@ -1,6 +1,6 @@
 import sys
 import traceback
-from goose.config import *
+from .config import *
 
 def excepthook(exception_class, exception, tb):
     CRITICAL('{0}: {1}'.format(exception_class.__name__, exception))
