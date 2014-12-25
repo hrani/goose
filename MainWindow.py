@@ -9,7 +9,7 @@ from goose.MdiArea import MdiArea
 class MainWindow(QMainWindow):
     def __init__(self, application, models):
         super(MainWindow, self).__init__()
-        self.setWindowFlags( self.windowFlags()
+        self.setWindowFlags(self.windowFlags()
                            # | QtCore.Qt.WindowContextHelpButtonHint
                            # | QtCore.Qt.CustomizeWindowHint
                            | QtCore.Qt.WindowMinimizeButtonHint
@@ -128,7 +128,7 @@ def createFullScreenAction(parent, widget):
         else:
             widget.showFullScreen()
 
-    action = createAction( "Full Screen"
+    action = createAction("Full Screen"
                          , parent
                          , slot
                          , QKeySequence(QtCore.Qt.Key_F11)
