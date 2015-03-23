@@ -1,0 +1,277 @@
+#!/usr/bin/python
+
+"""
+classic threaded rpyc server running  MooseService
+usage:
+    moose_server.py                         # default settings
+
+    # ssl-authenticated server (keyfile and certfile are required)
+    moose_server.py --ssl-keyfile keyfile.pem --ssl-certfile certfile.pem --ssl-cafile cafile.pem
+"""
+import sys
+import os
+import logging
+import datetime
+import moose
+from plumbum import cli
+import rpyc
+from rpyc.utils.server import ThreadedServer
+from rpyc.core import SlaveService
+from rpyc.utils.classic import DEFAULT_SERVER_PORT, DEFAULT_SERVER_SSL_PORT
+from rpyc.utils.registry import REGISTRY_PORT
+from rpyc.utils.registry import UDPRegistryClient, TCPRegistryClient
+from rpyc.utils.authenticators import SSLAuthenticator
+import time
+from threading import Thread
+
+logger = None
+
+class MooseService(SlaveService):
+    # exposed_runtime    = { "real"           :   {
+    #                                             }
+    #                      , "simulation"     :   {
+    #                                             }
+    #                      }
+    # exposed_minruntime = 0.0
+    # exposed_cumruntime
+    # exposed_curruntime
+    # _callbacks = []
+    # def exposed_add_callback(self, callback):
+    #     # if callback not in self._callbacks:
+    #     self._callbacks.append(callback)
+    #     print(self._callbacks)
+
+    # def exposed_remove_callback(self, callback):
+    #     if callback in self._callbacks:
+    #         self._callbacks.remove(callback)
+    #     print(self._callbacks)
+    # def service_callbacks(self):
+    #     for
+
+    thread              = Thread()
+    _active             = False
+    _simdt              = 10.0
+    _required_realtime  = 1.0
+    runtime_delta       = 0.0
+    results             = []
+    proxies             = []
+    _simulation_running = False
+    def exposed_load(self, modelfile):
+        pass
+
+    def simdata(self):
+        data = { "simtime"  :   moose.element("/clock").runTime
+               , "realtime" :   time.time()
+               }
+        self.results.append(data)
+        return data
+
+    def exposed_simdt(self, dt = None):
+        if dt is None:
+            return self._simdt
+        else:
+            self._simdt = dt
+
+    # def exposed_reset_simulation(self, ):
+
+    def exposed_continue_simulation(self):
+        self.active = True
+        self.thread = Thread( target    = self._run_simulation
+                            , args      = (runtime, callback)
+                            )
+        self.thread.start()
+
+    def exposed_stop_simulation(self):
+        self.active = False
+        self.thread.join()
+
+    def exposed_reset_simulation(self):
+        self.exposed_stop_simulation()
+        moose.reinit()
+        self.runtime_delta = 0.0
+
+    def exposed_run_simulation(self, runtime, callback):
+        if self.runtime_delta == 0.0:
+            self.runtime_delta = runtime
+        if runtime == moose.element("/clock").runTime:
+            runtime += self.runtime_delta
+        self._active = True
+        self.thread = Thread( target    = self._run_simulation
+                            , args      = (runtime, callback)
+                            )
+        self.thread.start()
+
+    def time_it(self, f, *args):
+        start = time.time()
+        result = f(*args)
+        return (time.time() - start, result)
+
+    def compute_curve(self, x0, x1, y0, y1):
+        return( (y1 - y0) / (x1 - x0)
+              , (y0 * x1 - x0 * y1) / (x1 - x0)
+              )
+
+    def clamp(self, minimum, value, maximum):
+        return min(max(minimum, value), maximum)
+
+    def _run_simulation( self
+                       , runtime
+                       , start_callback
+                       , update_callback
+                       , finish_callback
+                       ):
+        """This function is cool
+        """
+        async_callback = rpyc.async(callback)
+        y0 = max(self._simdt, self.runtime_delta / 1000.0)
+        y1 = 2 * y0
+        x0 = self.time_it(moose.start, y0)[0]
+        self.proxies.append(async_callback(self.simdata()))
+        x1 = self.time_it(moose.start, y1)[0]
+
+        remtime = runtime - moose.element("/clock").runTime
+
+        while self._active and remtime > 0.0:
+            self.proxies.append(async_callback(self.simdata()))
+            try:
+                (a, b) = self.compute_curve(x0, x1, y0, y1)
+            except ZeroDivisionError:
+                print("*******************************")
+                sys.exit()
+            simdelta = self.clamp( self._simdt
+                                 , a * self._required_realtime + b
+                                 , remtime
+                                 )
+            y0, y1 = y1, simdelta
+            x0, x1 = x1, self.time_it(moose.start, simdelta)[0]
+            remtime = runtime - moose.element("/clock").runTime
+            global logger
+            logger.info(simdelta)#moose.element("/clock").runTime, a, b, x1, )
+
+        async_callback(self.simdata())
+
+        # results = []
+        # async_callback = rpyc.async(callback)
+        # runfor = runtime / 1000.0
+        # b = 0
+        # a = 1000.0
+        # while runfor > 0.0 and self.active:
+        #     results.append(async_callback(self.simdata()))
+        #     print(runfor, " =>", moose.element("/clock").runTime)
+        #     x = time.time()
+        #     moose.start(runfor)
+        #     y = time.time()
+        #     # res = async_callback(data)
+        #     # t = Thread(target = res.wait)
+        #     # t.start()
+        #     runfor = 1.0 * runfor / (y - x)
+        #     remtime = runtime - moose.element("/clock").runTime
+        #     if runfor > remtime: runfor = remtime
+
+        # async_callback(self.simdata())
+        # print(runfor, " =>", moose.element("/clock").runTime)
+
+        # # x = datetime.datetime.now()
+        # # y = datetime.datetime.now()
+
+
+
+
+class MooseServer(cli.Application):
+
+    VERSION     = "1.0.0"
+    DESCRIPTION = """Start MOOSE as a server.
+MOOSE is the Multiscale Object-Oriented Simulation Environment.
+It is designed to simulate neural systems ranging from subcellular
+components and biochemical reactions to complex models of single
+neurons, circuits, and large networks. MOOSE can operate at many
+levels of detail, from stochastic chemical computations, to
+multicompartment single-neuron models, to spiking neuron network models.
+"""
+
+    port = cli.SwitchAttr(["-p", "--port"], cli.Range(0, 65535), default = None,
+        help="The TCP listener port (default = %s, default for SSL = %s)" %
+            (DEFAULT_SERVER_PORT, DEFAULT_SERVER_SSL_PORT), group = "Socket Options")
+    host = cli.SwitchAttr(["--host"], str, default = "", help = "The host to bind to. "
+        "The default is INADDR_ANY", group = "Socket Options")
+    ipv6 = cli.Flag(["--ipv6"], help = "Enable IPv6", group = "Socket Options")
+    logfile = cli.SwitchAttr("--logfile", str, default = None, help="Specify the log file to use; "
+        "the default is stderr", group = "Logging")
+    quiet = cli.Flag(["-q", "--quiet"], help = "Quiet mode (only errors will be logged)",
+        group = "Logging")
+
+    ssl_keyfile = cli.SwitchAttr("--ssl-keyfile", cli.ExistingFile,
+        help = "The keyfile to use for SSL. Required for SSL", group = "SSL",
+        requires = ["--ssl-certfile"])
+    ssl_certfile = cli.SwitchAttr("--ssl-certfile", cli.ExistingFile,
+        help = "The certificate file to use for SSL. Required for SSL", group = "SSL",
+        requires = ["--ssl-keyfile"])
+    ssl_cafile = cli.SwitchAttr("--ssl-cafile", cli.ExistingFile,
+        help = "The certificate authority chain file to use for SSL. Optional; enables client-side "
+        "authentication", group = "SSL", requires = ["--ssl-keyfile"])
+
+    auto_register = cli.Flag("--register", help = "Asks the server to attempt registering with "
+        "a registry server. By default, the server will not attempt to register",
+        group = "Registry")
+    registry_type = cli.SwitchAttr("--registry-type", cli.Set("UDP", "TCP"),
+        default = "UDP", help="Specify a UDP or TCP registry", group = "Registry")
+    registry_port = cli.SwitchAttr("--registry-port", cli.Range(0, 65535), default=REGISTRY_PORT,
+        help = "The registry's UDP/TCP port", group = "Registry")
+    registry_host = cli.SwitchAttr("--registry-host", str, default = None,
+        help = "The registry host machine. For UDP, the default is 255.255.255.255; "
+        "for TCP, a value is required", group = "Registry")
+
+    def main(self, *modelfiles):
+        if self.registry_type == "UDP":
+            if self.registry_host is None:
+                self.registry_host = "255.255.255.255"
+            self.registrar = UDPRegistryClient(ip = self.registry_host, port = self.registry_port)
+        else:
+            if self.registry_host is None:
+                raise ValueError("With TCP registry, you must specify --registry-host")
+            self.registrar = TCPRegistryClient(ip = self.registry_host, port = self.registry_port)
+
+        if self.ssl_keyfile:
+            self.authenticator = SSLAuthenticator(self.ssl_keyfile, self.ssl_certfile,
+                self.ssl_cafile)
+            default_port = DEFAULT_SERVER_SSL_PORT
+        else:
+            self.authenticator = None
+            default_port = DEFAULT_SERVER_PORT
+        if self.port is None:
+            self.port = default_port
+        global logger
+        logger = self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.DEBUG)
+        formatter = logging.Formatter("[%(asctime)s]-[%(levelname)s]-[%(filename)s:%(funcName)s:%(lineno)s]- %(message)s")
+
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        console.setLevel(logging.DEBUG if self.quiet is False else logging.ERROR)
+        self.logger.addHandler(console)
+
+        if self.logfile is not None:
+            stream = logging.FileHandler(self.logfile, mode = "w")
+            stream.setFormatter(formatter)
+            stream.setLevel(logging.DEBUG)
+            self.logger.addHandler(stream)
+
+        for modelfile in modelfiles:
+            moose.load(modelfile)
+
+        moose.loadModel("/home/aviral/Projects/moose-trunk/Demos/Genesis_files/Kholodenko.g", "/Kholodenko")
+
+        server = ThreadedServer( MooseService
+                               , hostname       = self.host
+                               , port           = self.port
+                               , reuse_addr     = True
+                               , ipv6           = self.ipv6
+                               , authenticator  = self.authenticator
+                               , registrar      = self.registrar
+                               , auto_register  = self.auto_register
+                               , logger         = self.logger
+                               )
+        server.start()
+
+if __name__ == "__main__":
+    MooseServer.run()

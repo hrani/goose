@@ -1,0 +1,34 @@
+#!/usr/bin/python
+#http://stackoverflow.com/questions/11513132/embedding-ipython-qt-console-in-a-pyqt-application/11525205#11525205
+# http://stackoverflow.com/questions/11513132/embedding-ipython-qt-console-in-a-pyqt-application/11940456#11940456
+
+import sys
+import os
+import traceback
+import goose
+print(goose.__file__)
+from goose.utils.config import *
+from goose.MainWindow import MainWindow
+from PyQt4 import Qt, QtCore, QtGui
+from PyQt4.QtGui import *
+
+
+def excepthook(exception_class, exception, tb):
+    CRITICAL('{0}: {1}'.format(exception_class.__name__, exception))
+    CRITICAL("\n" + "".join(traceback.format_tb(tb)))
+    sys.exit()
+
+def main():
+    sys.excepthook = excepthook
+    if not os.path.exists(MOOSE_LOG_DIRECTORY):
+        os.makedirs(MOOSE_LOG_DIRECTORY)
+    application = QApplication(sys.argv)
+    application.setWindowIcon(QIcon(APPLICATION_ICON_PATH))
+    window =  MainWindow(application, sys.argv[1:])
+    window.setWindowState(QtCore.Qt.WindowMaximized)
+    window.show()
+    sys.exit(application.exec_())
+
+
+if __name__ == "__main__":
+    main()
